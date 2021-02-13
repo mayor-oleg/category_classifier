@@ -1,0 +1,185 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov  2 20:15:09 2020
+
+@author: jr
+"""
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+import pandas as pd
+import re
+import regex
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Getting Data
+locations_ = open("./keywords/locations.txt", "r")
+locations = locations_.read().splitlines()
+for loc in locations:
+    if '\'' in loc:
+        locations.append(loc.replace('\'', ' '))
+        locations.append(loc.replace('\'', ''))
+        locations.append(loc.replace('\'', '-'))
+# print(locations)
+languages_ = open("./keywords/languages.txt", "r")
+languages = languages_.read().splitlines()
+#zz print(languages)
+
+filename = './keywords/classifier.sav'
+filepath_dict = {
+    '**********': './keywords/TrainingData.xlsx',
+}
+# '**********' - company's name 
+ignore = ['emea', 'job', 'americas', 'israel']
+jobs = ['temporary', 'full-time', 'full time', 'part-time', 'part time', 'entry level', 'entry-level']
+seniority = ['senior', 'students', 'student', 'key', 'middle', 'junior', 'intern', 'internship', 'team leader', 'team lead', 'lead', 'head', 'director']
+df_list = []
+for source, filepath in filepath_dict.items():
+    df = pd.read_excel(filepath, 'Data', names=['id', 'name', 'translation', 'clean', 'label', 'label_name'])
+    df['source'] = source  # Add another column filled with the source name
+    df_list.append(df)
+df = pd.concat(df_list)
+#print(df)
+#print (df.columns)
+
+
+# Cleaning Data
+def clean(df, name):
+    processed_article = []
+    list_word = []
+    all_words = []
+    num = 0
+    words = df[name].tolist()
+    for word in words:
+        processed_article.append(word.lower())
+    while num < len(processed_article):
+        processed_article[num] = re.sub('[^a-zA-Z&]', ' ', processed_article[num])
+        processed_article[num] = re.sub(r'\s+', ' ', processed_article[num])
+        num += 1
+    for word in processed_article:
+        word_temp = word
+        # for location in locations:
+        #     pattern = '(?:[.,!?\-\n\t]|\s|^)(%s)(?:[.,!?\-\n\t]|\s|$)' % regex.escape(location)
+        #     if regex.search(pattern, word_temp, regex.IGNORECASE):
+        #         word_temp = word.replace(location, '')
+        for location in ['jerusalem', 'tel aviv', 'yafo', 'beer sheva']:
+            if location in word_temp:
+                word_temp = word.replace(location, '')
+        # for language in languages:
+        #     if language in word_temp:
+        #         word_temp = word.replace(language, '')
+        for w in jobs + ignore + languages:
+            if w in word_temp:
+                word_temp = word.replace(w, '')
+
+        word_temp = word_temp.split(' ')
+        for el in word_temp:
+            if el in ['for', 'the', 'all', 'via']:
+                continue
+            if len(el) > 2 or el in ['bi', 'c#', 'c', 'ai', 'rf', 'c+', 'it', 'qa', 'sw', 'hw', 'ux', 'ui', 'hr', 'net', 'go', 'f#', 'js']:
+                list_word.append(el)
+        row = ' '.join(list_word)
+        for sen in seniority:
+            if len(sen.split()) > 1:
+                row = row.replace(sen, '')
+            else:
+                if (sen + ' ') in row or (' ' + sen) in row:
+                    row = row.replace(sen + ' ', '')
+                    row = row.replace(' ' + sen, '')
+        row = re.sub(' +', ' ', row).strip()
+        # print(row)
+        all_words.append(row)
+        list_word = [] 
+        
+    return all_words
+name1 = 'clean'
+df[name1] = clean(df, name1)
+df = df.drop(['id', 'source'], axis=1)
+# print(df.columns)
+
+#Drop IT
+df = df.loc[df['label_name'] != 'IT & Technology']
+#print (df)
+
+# NO Balance Data - to maby IT
+fig = plt.figure(figsize=(8, 6))
+df.groupby('label_name').clean.count().plot.bar(ylim=0)
+plt.show()
+
+
+
+#print(df[['label_name', 'label']].drop_duplicates().sort_values('label'))
+
+# Building dictinary
+#from io import StringIO
+col = ['label_name', 'clean']
+df = df[col]
+df = df[pd.notnull(df['clean'])]
+df.columns = ['label_name', 'clean']
+#df['label'] = df['label_name'].factorize()[0]
+df['label'], mapping = df['label_name'].factorize()
+# print(mapping)
+mapped_back_to_product_name = mapping.take(df['label'])
+# with pd.option_context('display.max_rows', None, 'display.max_columns', None):  # more options can be specified also
+#     print(mapped_back_to_product_name)
+
+# print(mapped_back_to_product_name)
+
+category_id_df = df[['label_name', 'label']].drop_duplicates().sort_values('label')
+#print(category_id_df)
+category_to_id = dict(category_id_df.values)
+#print(category_to_id)
+id_to_category = dict(category_id_df[['label_name', 'label']].values)
+#print(id_to_category)
+# print(id_to_category)
+
+# Building vectors
+tfidf = TfidfVectorizer(sublinear_tf=True, min_df=5, norm='l2', encoding='latin-1', ngram_range=(1, 2), stop_words='english')
+features = tfidf.fit_transform(df.clean).toarray()
+labels = df.label
+#print (features.shape)
+tfidf_tokens = tfidf.get_feature_names()
+df_tfidfvect = pd.DataFrame(data = features,columns = tfidf_tokens)
+#print (df_tfidfvect) #df of features and names features
+
+# Choose correlated features 
+from sklearn.feature_selection import chi2
+import numpy as np
+N = 2 # How much units in inugrams and bigrams
+for label_name, label in sorted(category_to_id.items()):
+  features_chi2 = chi2(features, labels == label)
+  indices = np.argsort(features_chi2[0])
+  feature_names = np.array(tfidf.get_feature_names())[indices]
+  unigrams = [v for v in feature_names if len(v.split(' ')) == 1]
+  bigrams = [v for v in feature_names if len(v.split(' ')) == 2]
+  # trigrams = [v for v in feature_names if len(v.split(' ')) == 3]
+  print("# '{}':".format(label_name))
+  print("  . Most correlated unigrams:\n. {}".format('\n. '.join(unigrams[-N:])))
+  print("  . Most correlated bigrams:\n. {}".format('\n. '.join(bigrams[-N:])))
+  # print("  . Most correlated trigrams:\n. {}".format('\n. '.join(trigrams[-N:])))
+  
+  
+  
+# Fit  
+
+from sklearn.svm import LinearSVC
+from sklearn.calibration import CalibratedClassifierCV
+
+clf = LinearSVC()
+X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.33, random_state=10)
+model = CalibratedClassifierCV(clf)
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+from sklearn.metrics import confusion_matrix
+conf_mat = confusion_matrix(y_test, y_pred)
+fig, ax = plt.subplots(figsize=(10, 10))
+sns.heatmap(conf_mat, annot=True, fmt='d',
+            xticklabels=category_id_df.label_name.values, yticklabels=category_id_df.label_name.values)
+plt.ylabel('Actual')
+plt.xlabel('Predicted')
+# plt.show()
+
+
+
+
